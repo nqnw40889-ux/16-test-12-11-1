@@ -1,0 +1,9 @@
+﻿Mô hình,Thuật toán,Cấu hình,Precision,Recall,F1-score,AP,PR-AUC,TN,FP,FN,TP
+XGBoost (Baseline),XGBoost,Baseline,0.8158,0.6078,0.6966,0.7699,0.7675,1442,7,20,31
+LightGBM (Baseline),LightGBM,Baseline,0.8205,0.6275,0.7111,0.7675,0.7639,1442,7,19,32
+Random Forest (Baseline),Random Forest,Baseline,0.8462,0.4314,0.5714,0.7326,0.729,1445,4,29,22
+LightGBM (Weighted),LightGBM,Weighted (balanced),0.4565,0.8235,0.5874,0.7094,0.7061,1399,50,9,42
+XGBoost (Weighted),XGBoost,Weighted (spw=28.54),0.4884,0.8235,0.6131,0.6905,0.6856,1405,44,9,42
+Random Forest (Weighted),Random Forest,Weighted (balanced),0.614,0.6863,0.6481,0.65,0.6435,1427,22,16,35
+Logistic Regression (Baseline),Logistic Regression,Baseline,0.6364,0.1373,0.2258,0.3881,0.3837,1445,4,44,7
+Logistic Regression (Weighted),Logistic Regression,Weighted (balanced),0.1365,0.7255,0.2298,0.3834,0.3795,1215,234,14,37

@@ -1,0 +1,9 @@
+﻿Mô hình,Train AP,Val AP,Chênh lệch AP,Train F1,Val F1,Chênh lệch F1,Train Recall,Val Recall,Đánh giá quá khớp
+XGBoost (Baseline),0.9217,0.7699,0.1519,0.8605,0.6966,0.1638,0.7806,0.6078,Có dấu hiệu quá khớp rõ rệt
+LightGBM (Baseline),0.9438,0.7675,0.1762,0.875,0.7111,0.1639,0.7975,0.6275,Có dấu hiệu quá khớp rõ rệt
+Random Forest (Baseline),0.9367,0.7326,0.2041,0.7747,0.5714,0.2033,0.6456,0.4314,Có dấu hiệu quá khớp rõ rệt
+LightGBM (Weighted),0.9381,0.7094,0.2287,0.6639,0.5874,0.0765,1.0,0.8235,Có dấu hiệu quá khớp rõ rệt
+XGBoost (Weighted),0.9509,0.6905,0.2604,0.7085,0.6131,0.0954,1.0,0.8235,Có dấu hiệu quá khớp rõ rệt
+Random Forest (Weighted),0.9693,0.65,0.3193,0.8436,0.6481,0.1955,0.9789,0.6863,Có dấu hiệu quá khớp rõ rệt
+Logistic Regression (Baseline),0.4805,0.3881,0.0924,0.3344,0.2258,0.1086,0.2152,0.1373,Chênh lệch nhẹ (kiểm soát tốt)
+Logistic Regression (Weighted),0.4485,0.3834,0.0652,0.2428,0.2298,0.013,0.8228,0.7255,Chênh lệch nhẹ (kiểm soát tốt)

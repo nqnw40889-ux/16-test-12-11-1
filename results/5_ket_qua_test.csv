@@ -1,0 +1,3 @@
+﻿Mô hình,Kịch bản ngưỡng,Ngưỡng,Precision,Recall,F1-score,AP,PR-AUC,TN,FP,FN,TP
+XGBoost (Baseline),Ngưỡng mặc định (t = 0.50),0.5,0.8421,0.6275,0.7191,0.7761,0.7739,1443,6,19,32
+XGBoost (Baseline),Ngưỡng tối ưu Validation (t* = 0.39),0.39,0.7955,0.6863,0.7368,0.7761,0.7739,1440,9,16,35
