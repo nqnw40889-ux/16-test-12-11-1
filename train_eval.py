@@ -177,14 +177,15 @@ def compute_metrics(
 
 
 def evaluate_overfitting_note(train_ap: float, val_ap: float, train_f1: float, val_f1: float) -> str:
-    """Đánh giá mức độ quá khớp giữa tập Train và Validation."""
+    """Chuẩn hóa đánh giá quá khớp dựa trên Train AP, Val AP và Chênh lệch AP."""
     ap_gap = train_ap - val_ap
-    f1_gap = train_f1 - val_f1
-    if ap_gap > 0.12 or f1_gap > 0.12:
-        return "Có dấu hiệu quá khớp rõ rệt"
-    if ap_gap > 0.05 or f1_gap > 0.05:
-        return "Chênh lệch nhẹ (kiểm soát tốt)"
-    return "Khái quát hóa ổn định"
+    if train_ap < 0.55 and val_ap < 0.50:
+        return "Chưa khớp (Hạn chế tuyến tính)"
+    if ap_gap <= 0.10 and val_ap >= 0.65:
+        return "Kiểm soát tốt (Không quá khớp)"
+    if ap_gap <= 0.15:
+        return "Chênh lệch nhẹ (Chấp nhận được)"
+    return "Có dấu hiệu quá khớp"
 
 
 def save_charts(
@@ -534,10 +535,10 @@ def run_pipeline() -> Dict[str, Any]:
             "config": "Baseline",
             "uses_scaled": False,
             "estimator": RandomForestClassifier(
-                n_estimators=300,
-                max_depth=10,
-                min_samples_leaf=4,
-                min_samples_split=8,
+                n_estimators=150,
+                max_depth=5,
+                min_samples_split=25,
+                min_samples_leaf=12,
                 max_features="sqrt",
                 random_state=RANDOM_STATE,
                 n_jobs=-1,
@@ -546,15 +547,15 @@ def run_pipeline() -> Dict[str, Any]:
         {
             "name": "Random Forest (Weighted)",
             "algorithm": "Random Forest",
-            "config": "Weighted (balanced)",
+            "config": "Weighted (balanced_subsample)",
             "uses_scaled": False,
             "estimator": RandomForestClassifier(
-                n_estimators=300,
-                max_depth=10,
-                min_samples_leaf=4,
-                min_samples_split=8,
+                n_estimators=150,
+                max_depth=5,
+                min_samples_split=25,
+                min_samples_leaf=12,
                 max_features="sqrt",
-                class_weight="balanced",
+                class_weight="balanced_subsample",
                 random_state=RANDOM_STATE,
                 n_jobs=-1,
             ),
@@ -565,37 +566,37 @@ def run_pipeline() -> Dict[str, Any]:
             "config": "Baseline",
             "uses_scaled": False,
             "estimator": XGBClassifier(
-                n_estimators=260,
-                max_depth=4,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
+                n_estimators=200,
+                learning_rate=0.04,
+                max_depth=3,
                 min_child_weight=3,
-                reg_lambda=2.5,
-                reg_alpha=0.2,
+                subsample=0.75,
+                colsample_bytree=0.8,
+                reg_alpha=1.0,
+                reg_lambda=1.0,
                 eval_metric="logloss",
                 random_state=RANDOM_STATE,
-                n_jobs=-1,
+                n_jobs=1,
             ),
         },
         {
             "name": "XGBoost (Weighted)",
             "algorithm": "XGBoost",
-            "config": f"Weighted (spw={scale_pos_weight:.2f})",
+            "config": "Weighted (spw=5.0)",
             "uses_scaled": False,
             "estimator": XGBClassifier(
-                n_estimators=260,
-                max_depth=4,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                min_child_weight=3,
-                reg_lambda=2.5,
-                reg_alpha=0.2,
-                scale_pos_weight=scale_pos_weight,
+                n_estimators=100,
+                learning_rate=0.04,
+                max_depth=3,
+                min_child_weight=10,
+                subsample=0.75,
+                colsample_bytree=0.75,
+                reg_alpha=1.5,
+                reg_lambda=6.0,
+                scale_pos_weight=5.0,
                 eval_metric="logloss",
                 random_state=RANDOM_STATE,
-                n_jobs=-1,
+                n_jobs=1,
             ),
         },
         {
@@ -604,40 +605,40 @@ def run_pipeline() -> Dict[str, Any]:
             "config": "Baseline",
             "uses_scaled": False,
             "estimator": LGBMClassifier(
-                n_estimators=250,
-                max_depth=4,
-                num_leaves=15,
-                learning_rate=0.05,
+                n_estimators=140,
+                learning_rate=0.04,
+                max_depth=3,
+                num_leaves=7,
                 min_child_samples=25,
                 subsample=0.8,
                 subsample_freq=1,
-                colsample_bytree=0.8,
-                reg_lambda=2.5,
-                reg_alpha=0.2,
+                colsample_bytree=1.0,
+                reg_alpha=0.5,
+                reg_lambda=2.0,
                 random_state=RANDOM_STATE,
-                n_jobs=-1,
+                n_jobs=1,
                 verbose=-1,
             ),
         },
         {
             "name": "LightGBM (Weighted)",
             "algorithm": "LightGBM",
-            "config": "Weighted (balanced)",
+            "config": "Weighted (weight=5.0)",
             "uses_scaled": False,
             "estimator": LGBMClassifier(
-                n_estimators=250,
-                max_depth=4,
-                num_leaves=15,
-                learning_rate=0.05,
-                min_child_samples=25,
-                subsample=0.8,
+                n_estimators=100,
+                learning_rate=0.04,
+                max_depth=3,
+                num_leaves=7,
+                min_child_samples=35,
+                subsample=0.75,
                 subsample_freq=1,
-                colsample_bytree=0.8,
-                reg_lambda=2.5,
-                reg_alpha=0.2,
-                class_weight="balanced",
+                colsample_bytree=0.75,
+                reg_alpha=1.5,
+                reg_lambda=6.0,
+                class_weight={0: 1.0, 1: 5.0},
                 random_state=RANDOM_STATE,
-                n_jobs=-1,
+                n_jobs=1,
                 verbose=-1,
             ),
         },

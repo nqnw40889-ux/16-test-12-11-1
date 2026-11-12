@@ -974,7 +974,21 @@ with tab4:
     st.dataframe(df_val.style.apply(highlight_best_val_row, axis=1), width="stretch", hide_index=True)
 
     st.markdown("#### 2. Đánh giá Quá khớp: So sánh Train vs Validation (Mục 3.2.5)")
-    st.dataframe(df_overfit, width="stretch", hide_index=True)
+    def style_overfit_row(row: pd.Series) -> List[str]:
+        note = str(row["Đánh giá quá khớp"])
+        styles = [""] * len(row)
+        idx = list(row.index).index("Đánh giá quá khớp")
+        if "Kiểm soát tốt" in note:
+            styles[idx] = "background-color: #dcfce7; color: #166534; font-weight: 700;"
+        elif "Chênh lệch nhẹ" in note:
+            styles[idx] = "background-color: #fef9c3; color: #854d0e; font-weight: 600;"
+        elif "Chưa khớp" in note:
+            styles[idx] = "background-color: #f1f5f9; color: #334155; font-weight: 600;"
+        elif "quá khớp" in note:
+            styles[idx] = "background-color: #fee2e2; color: #991b1b; font-weight: 700;"
+        return styles
+
+    st.dataframe(df_overfit.style.apply(style_overfit_row, axis=1), width="stretch", hide_index=True)
 
     st.markdown("#### 3. Đường cong Precision–Recall & Tối ưu Ngưỡng phân loại trên Validation")
     vc1, vc2 = st.columns(2, gap="large")
