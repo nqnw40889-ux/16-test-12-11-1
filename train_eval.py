@@ -816,6 +816,18 @@ def run_pipeline() -> Dict[str, Any]:
         for raw_col, col in zip(NUMERIC_COLS_RAW, NUMERIC_COLS_CLEAN)
     }
 
+    train_ranges = {
+        "numeric": {
+            raw_col: {
+                "min": float(df_train[raw_col].min()),
+                "max": float(df_train[raw_col].max()),
+                "unit": raw_col.split("[")[-1].rstrip("]") if "[" in raw_col else "",
+            }
+            for raw_col in NUMERIC_COLS_RAW
+        },
+        "valid_types": ["L", "M", "H"],
+    }
+
     artifacts = {
         "models": trained_models,
         "best_model_name": best_model_name,
@@ -832,6 +844,7 @@ def run_pipeline() -> Dict[str, Any]:
         "test_probs": test_probs,
         "threshold_scan": threshold_scan_df,
         "train_stats": train_stats,
+        "train_ranges": train_ranges,
         "quality_summary": {
             "n_rows": int(df.shape[0]),
             "n_cols": int(df.shape[1]),

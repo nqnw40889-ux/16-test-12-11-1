@@ -131,6 +131,27 @@ CUSTOM_CSS = """
         box-shadow: 0 6px 16px rgba(239, 68, 68, 0.14);
         margin-bottom: 1rem;
     }
+    .status-card-oor {
+        background: #fff7ed;
+        border: 2px solid #ea580c;
+        border-radius: 14px;
+        padding: 1.2rem 1.4rem;
+        color: #9a3412;
+        box-shadow: 0 6px 18px rgba(234, 88, 12, 0.16);
+        margin-bottom: 1rem;
+    }
+    .modified-warning-box {
+        background: #fefce8;
+        border-left: 4px solid #ca8a04;
+        border-radius: 10px;
+        padding: 0.85rem 1rem;
+        color: #854d0e;
+        margin: 0.5rem 0 1rem 0;
+        border-top: 1px solid #fde047;
+        border-right: 1px solid #fde047;
+        border-bottom: 1px solid #fde047;
+        font-weight: 600;
+    }
     .status-title {
         font-size: 1.15rem;
         font-weight: 800;
@@ -222,6 +243,22 @@ scaler = artifacts["scaler"]
 df_test: pd.DataFrame = artifacts["df_test"]
 test_probs_best: np.ndarray = artifacts["test_probs"]
 quality_summary: Dict[str, Any] = artifacts["quality_summary"]
+train_stats: Dict[str, Any] = artifacts.get("train_stats", {})
+
+if "train_ranges" in artifacts:
+    train_ranges: Dict[str, Any] = artifacts["train_ranges"]
+else:
+    train_ranges = {
+        "numeric": {
+            raw_col: {
+                "min": float(train_stats[clean_col]["min"]),
+                "max": float(train_stats[clean_col]["max"]),
+                "unit": raw_col.split("[")[-1].rstrip("]") if "[" in raw_col else "",
+            }
+            for raw_col, clean_col in zip(NUMERIC_COLS_RAW, NUMERIC_COLS_CLEAN)
+        },
+        "valid_types": ["L", "M", "H"],
+    }
 
 df_desc = load_csv_result("1_thong_ke_mo_ta.csv")
 df_split = load_csv_result("2_phan_chia_du_lieu.csv")
@@ -394,6 +431,122 @@ def get_id_col_name(df_frame: pd.DataFrame) -> str:
     return "UDI" if "UDI" in df_frame.columns else ("UID" if "UID" in df_frame.columns else "Index")
 
 
+def build_train_range_table(ranges: Dict[str, Any]) -> pd.DataFrame:
+    """Tạo bảng phạm vi dữ liệu hợp lệ trên tập Train (70%) để đối chiếu."""
+    rows = [
+        {
+            "Thuộc tính đầu vào": "Type",
+            "Giá trị nhỏ nhất (Min Train)": ", ".join(ranges["valid_types"]),
+            "Giá trị lớn nhất (Max Train)": "—",
+            "Đơn vị / Quy ước": "Phân loại (chỉ L, M, H)",
+        }
+    ]
+    for raw_col in NUMERIC_COLS_RAW:
+        info = ranges["numeric"][raw_col]
+        rows.append({
+            "Thuộc tính đầu vào": raw_col,
+            "Giá trị nhỏ nhất (Min Train)": f"{info['min']:g}",
+            "Giá trị lớn nhất (Max Train)": f"{info['max']:g}",
+            "Đơn vị / Quy ước": info["unit"],
+        })
+    return pd.DataFrame(rows)
+
+
+def check_single_out_of_range(
+    prod_type: Any,
+    air: Any,
+    proc: Any,
+    rpm: Any,
+    torque: Any,
+    wear: Any,
+    ranges: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    """Kiểm tra 6 thuộc tính đầu vào so với phạm vi [Min, Max] của tập Train."""
+    violations: List[Dict[str, str]] = []
+    valid_types = set(ranges["valid_types"])
+    t_norm = str(prod_type).strip().upper()
+    if t_norm not in valid_types:
+        violations.append({
+            "col": "Type",
+            "entered": str(prod_type),
+            "range": ", ".join(ranges["valid_types"]),
+            "message": f"Type = '{prod_type}' (Ngoài giá trị hợp lệ: {', '.join(ranges['valid_types'])})",
+        })
+
+    values_map = {
+        "Air temperature [K]": air,
+        "Process temperature [K]": proc,
+        "Rotational speed [rpm]": rpm,
+        "Torque [Nm]": torque,
+        "Tool wear [min]": wear,
+    }
+    for raw_col in NUMERIC_COLS_RAW:
+        info = ranges["numeric"][raw_col]
+        r_min, r_max, unit = info["min"], info["max"], info["unit"]
+        val = values_map[raw_col]
+        try:
+            num_val = float(val)
+            is_finite = math.isfinite(num_val)
+        except (TypeError, ValueError):
+            num_val = float("nan")
+            is_finite = False
+
+        if not is_finite:
+            violations.append({
+                "col": raw_col,
+                "entered": str(val),
+                "range": f"{r_min:g} {unit} – {r_max:g} {unit}",
+                "message": f"{raw_col} = '{val}' (Giá trị không hợp lệ; phạm vi Train: {r_min:g} {unit} – {r_max:g} {unit})",
+            })
+        elif num_val < r_min or num_val > r_max:
+            violations.append({
+                "col": raw_col,
+                "entered": f"{num_val:g} {unit}",
+                "range": f"{r_min:g} {unit} – {r_max:g} {unit}",
+                "message": f"{raw_col} = {num_val:g} {unit} (Ngoài phạm vi Train: {r_min:g} {unit} – {r_max:g} {unit})",
+            })
+    return violations
+
+
+def validate_batch_dataframe(
+    df_norm: pd.DataFrame, ranges: Dict[str, Any]
+) -> tuple[np.ndarray, List[str]]:
+    """Kiểm tra từng dòng trong CSV đối với cột Type và 5 cột số theo phạm vi Train."""
+    valid_types = set(ranges["valid_types"])
+    n_rows = len(df_norm)
+    valid_mask = np.ones(n_rows, dtype=bool)
+    col_notes: List[str] = []
+
+    for pos in range(n_rows):
+        row = df_norm.iloc[pos]
+        row_issues: List[str] = []
+
+        raw_type = row["Type"]
+        if pd.isna(raw_type) or str(raw_type).strip().upper() not in valid_types:
+            row_issues.append(f"Type ('{raw_type}' ∉ {{L, M, H}})")
+
+        for raw_col in NUMERIC_COLS_RAW:
+            info = ranges["numeric"][raw_col]
+            r_min, r_max = info["min"], info["max"]
+            val = pd.to_numeric(row[raw_col], errors="coerce")
+            if pd.isna(val) or not math.isfinite(float(val)):
+                row_issues.append(f"{raw_col} (Không hợp lệ/Trống)")
+            else:
+                fval = float(val)
+                if fval < r_min:
+                    row_issues.append(f"{raw_col} ({fval:g} < {r_min:g})")
+                elif fval > r_max:
+                    row_issues.append(f"{raw_col} ({fval:g} > {r_max:g})")
+
+        if row_issues:
+            valid_mask[pos] = False
+            col_notes.append("; ".join(row_issues))
+        else:
+            col_notes.append("Hợp lệ (Trong phạm vi)")
+
+    return valid_mask, col_notes
+
+
 # ==============================================================================
 # SIDEBAR THÔNG TIN ĐỀ TÀI & MÔ HÌNH
 # ==============================================================================
@@ -466,7 +619,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # TAB 1: DỰ ĐOÁN & CHẨN ĐOÁN BẢO TRÌ (THỜI GIAN THỰC)
 # ------------------------------------------------------------------------------
 with tab1:
-    # Khởi tạo session_state cho 6 thông số đầu vào
+    # Khởi tạo session_state cho 6 thông số đầu vào và cơ chế khóa mẫu Test
     default_sample = df_test.iloc[0]
     state_defaults = {
         "inp_type": str(default_sample["Type"]),
@@ -476,10 +629,24 @@ with tab1:
         "inp_torque": float(default_sample["Torque [Nm]"]),
         "inp_wear": int(default_sample["Tool wear [min]"]),
         "selected_test_idx": None,
+        "lock_test_inputs": True,
+        "last_sample_mode": "✏️ Nhập thủ công",
     }
     for k, v in state_defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+    def load_test_sample_into_state(idx: int, lock_after: bool = True) -> None:
+        r = df_test.loc[idx]
+        st.session_state["inp_type"] = str(r["Type"])
+        st.session_state["inp_air"] = float(r["Air temperature [K]"])
+        st.session_state["inp_proc"] = float(r["Process temperature [K]"])
+        st.session_state["inp_rpm"] = int(r["Rotational speed [rpm]"])
+        st.session_state["inp_torque"] = float(r["Torque [Nm]"])
+        st.session_state["inp_wear"] = int(r["Tool wear [min]"])
+        st.session_state["selected_test_idx"] = int(idx)
+        if lock_after:
+            st.session_state["lock_test_inputs"] = True
 
     st.subheader("1. Chọn nhanh mẫu thực tế từ tập Kiểm thử (Test set - 1.500 mẫu) hoặc tự nhập")
 
@@ -497,12 +664,14 @@ with tab1:
             key="tab1_sample_mode",
         )
 
+    mode_changed = sample_mode != st.session_state.get("last_sample_mode")
+    st.session_state["last_sample_mode"] = sample_mode
+
     selected_row = None
     with sample_col:
         if sample_mode != "✏️ Nhập thủ công":
             target_val = 0 if "Nhãn 0" in sample_mode else 1
             subset_df = df_test[df_test["Machine failure"] == target_val].copy()
-
             options = subset_df.index.tolist()
 
             def fmt_option(idx: int) -> str:
@@ -515,22 +684,22 @@ with tab1:
 
             def on_sample_change() -> None:
                 idx = st.session_state["test_sample_picker"]
-                r = df_test.loc[idx]
-                st.session_state["inp_type"] = str(r["Type"])
-                st.session_state["inp_air"] = float(r["Air temperature [K]"])
-                st.session_state["inp_proc"] = float(r["Process temperature [K]"])
-                st.session_state["inp_rpm"] = int(r["Rotational speed [rpm]"])
-                st.session_state["inp_torque"] = float(r["Torque [Nm]"])
-                st.session_state["inp_wear"] = int(r["Tool wear [min]"])
-                st.session_state["selected_test_idx"] = int(idx)
+                load_test_sample_into_state(int(idx), lock_after=True)
 
-            # Tự đồng bộ lần đầu khi chuyển sang chế độ chọn mẫu Test
+            def on_lock_change() -> None:
+                # Nếu người dùng bật khóa trở lại, khôi phục đúng 6 thông số nguyên bản của mẫu Test
+                if st.session_state.get("lock_test_inputs", True):
+                    idx = st.session_state.get("test_sample_picker")
+                    if idx in options:
+                        load_test_sample_into_state(int(idx), lock_after=False)
+
             if (
-                "test_sample_picker" not in st.session_state
+                mode_changed
+                or "test_sample_picker" not in st.session_state
                 or st.session_state["test_sample_picker"] not in options
             ):
                 st.session_state["test_sample_picker"] = options[0]
-                on_sample_change()
+                load_test_sample_into_state(int(options[0]), lock_after=True)
 
             picked_idx = st.selectbox(
                 f"Chọn một mẫu từ tập Test ({len(options):,} mẫu khả dụng):",
@@ -539,31 +708,30 @@ with tab1:
                 key="test_sample_picker",
                 on_change=on_sample_change,
             )
-            # Đảm bảo cập nhật nếu người dùng vừa đổi từ "Nhập thủ công" sang mẫu thực tế
-            if st.session_state.get("selected_test_idx") != picked_idx:
-                on_sample_change()
+            if st.session_state.get("selected_test_idx") != int(picked_idx):
+                load_test_sample_into_state(int(picked_idx), lock_after=True)
 
             selected_row = df_test.loc[picked_idx]
-            sub_failures = [c for c in ["TWF", "HDF", "PWF", "OSF", "RNF"] if c in selected_row and int(selected_row[c]) == 1]
-            sub_fail_str = ", ".join(sub_failures) if sub_failures else "Không ghi nhận lỗi thành phần"
-            actual_badge = "🔴 CÓ HỎNG (Nhãn = 1)" if int(selected_row["Machine failure"]) == 1 else "🟢 BÌNH THƯỜNG (Nhãn = 0)"
 
-            st.markdown(
-                f"""
-                <div class="sample-meta-box">
-                    <strong>Mẫu kiểm thử đang nạp:</strong> <code>{id_col} = {selected_row[id_col]}</code> &nbsp;|&nbsp;
-                    <strong>Mã sản phẩm:</strong> <code>{selected_row['Product ID']}</code> &nbsp;|&nbsp;
-                    <strong>Nhãn thực tế:</strong> {actual_badge}<br>
-                    <span style="font-size:0.86rem; color:#475569;">
-                        <strong>Ghi chú lỗi thành phần gốc (chỉ để đối chiếu, không đưa vào mô hình):</strong> {sub_fail_str}
-                    </span>
-                </div>
-                """,
-                unsafe_allow_html=True,
+            st.checkbox(
+                "🔒 Khóa thông số để đối chiếu nguyên bản mẫu Test",
+                key="lock_test_inputs",
+                on_change=on_lock_change,
+                help="Khi bật khóa, 6 thông số bị vô hiệu hóa chỉnh sửa để đảm bảo đối chiếu chính xác với nhãn gốc của mẫu Test. Tắt khóa để tùy chỉnh thông số.",
             )
         else:
             st.session_state["selected_test_idx"] = None
-            st.info("Đang ở chế độ **Nhập thủ công**. Bạn có thể kéo các thanh trượt bên dưới để mô phỏng trạng thái cảm biến bất kỳ.")
+            st.info(
+                "Đang ở chế độ **Nhập thủ công**. Bạn có thể nhập giá trị cảm biến bất kỳ vào 6 ô bên dưới "
+                "(hệ thống sẽ tự động cảnh báo nếu thông số vượt phạm vi tập Train)."
+            )
+
+    # Placeholder để cập nhật trạng thái đối chiếu NGAY LẬP TỨC theo giá trị hiện tại của 6 ô nhập
+    meta_placeholder = st.empty()
+
+    inputs_disabled = bool(
+        selected_row is not None and st.session_state.get("lock_test_inputs", True)
+    )
 
     st.divider()
 
@@ -598,142 +766,256 @@ with tab1:
                 "Loại sản phẩm (Type):",
                 options=["L", "M", "H"],
                 key="inp_type",
+                disabled=inputs_disabled,
                 help="L: Chất lượng thấp (Low), M: Trung bình (Medium), H: Cao (High)",
             )
-            inp_air = st.slider(
+            inp_air = st.number_input(
                 "Nhiệt độ không khí - Air temp [K]:",
-                min_value=290.0,
-                max_value=310.0,
+                min_value=None,
+                max_value=None,
                 step=0.1,
+                format="%.1f",
                 key="inp_air",
+                disabled=inputs_disabled,
+                help=f"Phạm vi Train: {train_ranges['numeric']['Air temperature [K]']['min']:g} – {train_ranges['numeric']['Air temperature [K]']['max']:g} K. Có thể nhập ngoài khoảng để kiểm tra cảnh báo.",
             )
-            inp_rpm = st.slider(
+            inp_rpm = st.number_input(
                 "Tốc độ quay - Rotational speed [rpm]:",
-                min_value=1000,
-                max_value=3000,
-                step=5,
+                min_value=None,
+                max_value=None,
+                step=1,
+                format="%d",
                 key="inp_rpm",
+                disabled=inputs_disabled,
+                help=f"Phạm vi Train: {train_ranges['numeric']['Rotational speed [rpm]']['min']:g} – {train_ranges['numeric']['Rotational speed [rpm]']['max']:g} rpm.",
             )
         with c2:
-            inp_wear = st.slider(
+            inp_wear = st.number_input(
                 "Thời gian dùng dao - Tool wear [min]:",
-                min_value=0,
-                max_value=300,
+                min_value=None,
+                max_value=None,
                 step=1,
+                format="%d",
                 key="inp_wear",
+                disabled=inputs_disabled,
+                help=f"Phạm vi Train: {train_ranges['numeric']['Tool wear [min]']['min']:g} – {train_ranges['numeric']['Tool wear [min]']['max']:g} min.",
             )
-            inp_proc = st.slider(
+            inp_proc = st.number_input(
                 "Nhiệt độ quá trình - Process temp [K]:",
-                min_value=300.0,
-                max_value=320.0,
+                min_value=None,
+                max_value=None,
                 step=0.1,
+                format="%.1f",
                 key="inp_proc",
+                disabled=inputs_disabled,
+                help=f"Phạm vi Train: {train_ranges['numeric']['Process temperature [K]']['min']:g} – {train_ranges['numeric']['Process temperature [K]']['max']:g} K.",
             )
-            inp_torque = st.slider(
+            inp_torque = st.number_input(
                 "Mô-men xoắn - Torque [Nm]:",
-                min_value=0.0,
-                max_value=90.0,
-                step=0.5,
+                min_value=None,
+                max_value=None,
+                step=0.1,
+                format="%.1f",
                 key="inp_torque",
+                disabled=inputs_disabled,
+                help=f"Phạm vi Train: {train_ranges['numeric']['Torque [Nm]']['min']:g} – {train_ranges['numeric']['Torque [Nm]']['max']:g} Nm.",
             )
 
-    # Thực hiện dự đoán thời gian thực
-    df_single = pd.DataFrame([
-        {
-            "Type": inp_type,
-            "Air temperature [K]": float(inp_air),
-            "Process temperature [K]": float(inp_proc),
-            "Rotational speed [rpm]": int(inp_rpm),
-            "Torque [Nm]": float(inp_torque),
-            "Tool wear [min]": int(inp_wear),
-        }
-    ])
-    probs_1, preds_1, X_enc_1, X_scl_1 = predict_dataframe(df_single, chosen_model, chosen_threshold)
-    prob_val = float(probs_1[0])
-    pred_val = int(preds_1[0])
+        st.markdown("##### 📏 Bảng phạm vi dữ liệu hợp lệ (Tập Train)")
+        st.dataframe(build_train_range_table(train_ranges), width="stretch", hide_index=True)
+
+    # Kiểm tra thông số có bị sửa so với mẫu Test gốc hay không (ngay sau khi đọc 6 widget)
+    is_modified = False
+    if selected_row is not None:
+        is_modified = (
+            str(inp_type).strip().upper() != str(selected_row["Type"]).strip().upper()
+            or abs(float(inp_air) - float(selected_row["Air temperature [K]"])) > 1e-4
+            or abs(float(inp_proc) - float(selected_row["Process temperature [K]"])) > 1e-4
+            or abs(float(inp_rpm) - float(selected_row["Rotational speed [rpm]"])) > 1e-4
+            or abs(float(inp_torque) - float(selected_row["Torque [Nm]"])) > 1e-4
+            or abs(float(inp_wear) - float(selected_row["Tool wear [min]"])) > 1e-4
+        )
+
+    # Điền meta_placeholder theo đúng trạng thái thực tế hiện tại
+    with meta_placeholder.container():
+        if selected_row is not None and not is_modified:
+            sub_failures = [
+                c for c in ["TWF", "HDF", "PWF", "OSF", "RNF"]
+                if c in selected_row and int(selected_row[c]) == 1
+            ]
+            sub_fail_str = ", ".join(sub_failures) if sub_failures else "Không ghi nhận lỗi thành phần"
+            actual_badge = (
+                "🔴 CÓ HỎNG (Nhãn = 1)"
+                if int(selected_row["Machine failure"]) == 1
+                else "🟢 BÌNH THƯỜNG (Nhãn = 0)"
+            )
+            st.markdown(
+                f"""
+                <div class="sample-meta-box">
+                    <strong>Mẫu kiểm thử nguyên bản đang đối chiếu:</strong> <code>{id_col} = {selected_row[id_col]}</code> &nbsp;|&nbsp;
+                    <strong>Mã sản phẩm:</strong> <code>{selected_row['Product ID']}</code> &nbsp;|&nbsp;
+                    <strong>Nhãn thực tế:</strong> {actual_badge}<br>
+                    <span style="font-size:0.86rem; color:#475569;">
+                        <strong>Ghi chú lỗi thành phần gốc (chỉ để đối chiếu, không đưa vào mô hình):</strong> {sub_fail_str}
+                    </span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        elif selected_row is not None and is_modified:
+            st.markdown(
+                """
+                <div class="modified-warning-box">
+                    ⚠️ Thông số đã được thay đổi so với mẫu Test gốc. Đã ẩn đối chiếu nhãn gốc (Chuyển sang chế độ dự đoán đầu vào tùy chỉnh).
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    # Kiểm tra phạm vi Train TRƯỚC KHI kết luận
+    violations = check_single_out_of_range(
+        inp_type, inp_air, inp_proc, inp_rpm, inp_torque, inp_wear, train_ranges
+    )
 
     with right_col:
         st.subheader("3. Kết quả Chẩn đoán & Phân tích Kỹ thuật")
-        if pred_val == 1:
-            st.markdown(
-                f"""
-                <div class="status-card-fail">
-                    <div class="status-title">🚨 CẢNH BÁO: CÓ NGUY CƠ HỎNG HÓC (DỰ ĐOÁN = 1)</div>
-                    <p class="status-desc">
-                        Mô hình <strong>{chosen_model}</strong> ước lượng xác suất hỏng hóc đạt
-                        <strong>{prob_val*100:.2f}%</strong> (vượt ngưỡng quyết định <strong>{chosen_threshold*100:.0f}%</strong>).
-                        Đề xuất lên lịch kiểm tra và bảo trì thiết bị sớm.
-                    </p>
-                </div>
-                """,
-                unsafe_allow_html=True,
+
+        if len(violations) > 0:
+            bullets_html = "".join(
+                f"<li><strong>Cột vượt khoảng:</strong> {v['message']}</li>"
+                for v in violations
             )
-        else:
             st.markdown(
                 f"""
-                <div class="status-card-ok">
-                    <div class="status-title">✅ BÌNH THƯỜNG: KHÔNG GHI NHẬN HỎNG HÓC (DỰ ĐOÁN = 0)</div>
-                    <p class="status-desc">
-                        Mô hình <strong>{chosen_model}</strong> ước lượng xác suất hỏng hóc là
-                        <strong>{prob_val*100:.2f}%</strong> (dưới ngưỡng quyết định <strong>{chosen_threshold*100:.0f}%</strong>).
-                        Thiết bị đang hoạt động trong vùng an toàn.
+                <div class="status-card-oor">
+                    <div class="status-title">⚠️ Kết quả ngoài phạm vi train, không đủ cơ sở kết luận</div>
+                    <p class="status-desc" style="margin-bottom:0.45rem;">
+                        Phát hiện <strong>{len(violations)}</strong> thuộc tính đầu vào nằm ngoài miền giá trị của tập huấn luyện (Train 70%):
+                    </p>
+                    <ul class="oor-list">{bullets_html}</ul>
+                    <p class="status-desc" style="margin-top:0.55rem;">
+                        <strong>Giải thích khoa học:</strong> Mô hình học máy chỉ đảm bảo độ tin cậy nội suy trong miền giá trị của tập huấn luyện;
+                        hệ thống <strong>không gán nhãn 0 hay 1</strong> cho điểm dữ liệu ngoại suy nhằm tránh chẩn đoán sai lệch.
                     </p>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-        g_col, sig_col = st.columns([1.05, 1.0])
-        with g_col:
-            st.plotly_chart(build_gauge_chart(prob_val, chosen_threshold), width="stretch")
-
-        with sig_col:
-            st.markdown("**Phân tích kỹ thuật nhanh (Chỉ số vật lý AI4I 2020):**")
-            eng_signals = analyze_engineering_signals(
-                inp_type, float(inp_air), float(inp_proc), float(inp_rpm), float(inp_torque), float(inp_wear)
-            )
-            for sig in eng_signals:
-                if sig["level"] == "danger":
-                    st.error(f"{sig['icon']} **{sig['title']}**: {sig['detail']}")
-                elif sig["level"] == "warning":
-                    st.warning(f"{sig['icon']} **{sig['title']}**: {sig['detail']}")
-                else:
-                    st.success(f"{sig['icon']} **{sig['title']}**: {sig['detail']}")
-
-        # Đối chiếu trực tiếp với nhãn thực tế nếu đang chọn mẫu từ Test
-        if selected_row is not None:
-            actual_y = int(selected_row["Machine failure"])
-            if actual_y == 1 and pred_val == 1:
-                verdict = "TP — Phát hiện đúng hỏng hóc"
-            elif actual_y == 0 and pred_val == 0:
-                verdict = "TN — Dự đoán đúng bình thường"
-            elif actual_y == 0 and pred_val == 1:
-                verdict = "FP — Cảnh báo nhầm (Dương tính giả)"
-            else:
-                verdict = "FN — Bỏ sót hỏng hóc (Âm tính giả)"
-
-            compare_df = pd.DataFrame([
+            viol_df = pd.DataFrame([
                 {
-                    "Mã UDI": selected_row[id_col],
-                    "Product ID": selected_row["Product ID"],
-                    "Nhãn thực tế": f"{actual_y} ({'Có hỏng' if actual_y == 1 else 'Không hỏng'})",
-                    "Nhãn dự đoán": f"{pred_val} ({'Có hỏng' if pred_val == 1 else 'Không hỏng'})",
-                    "Xác suất P(y=1|x)": f"{prob_val*100:.2f}%",
-                    "Ngưỡng": f"{chosen_threshold:.2f}",
-                    "Kết luận đối chiếu": verdict,
+                    "Cột vượt khoảng": v["col"],
+                    "Giá trị đã nhập": v["entered"],
+                    "Phạm vi hợp lệ (Tập Train)": v["range"],
+                    "Kết luận": "Kết quả ngoài phạm vi train, không đủ cơ sở kết luận",
+                }
+                for v in violations
+            ])
+            st.markdown("**Chi tiết các thuộc tính vượt ngưỡng tập Train:**")
+            st.dataframe(viol_df, width="stretch", hide_index=True)
+
+            if selected_row is not None and is_modified:
+                st.caption("ℹ️ Đang kiểm tra đầu vào tùy chỉnh đã chỉnh sửa — không gán nhãn hay đối chiếu nhãn gốc của mẫu Test.")
+        else:
+            # Thực hiện dự đoán thời gian thực khi toàn bộ thông số nằm trong phạm vi Train
+            df_single = pd.DataFrame([
+                {
+                    "Type": inp_type,
+                    "Air temperature [K]": float(inp_air),
+                    "Process temperature [K]": float(inp_proc),
+                    "Rotational speed [rpm]": int(inp_rpm),
+                    "Torque [Nm]": float(inp_torque),
+                    "Tool wear [min]": int(inp_wear),
                 }
             ])
-            st.markdown("**Đối chiếu với Nhãn thực tế (Tập Test):**")
-            st.dataframe(compare_df, width="stretch", hide_index=True)
+            probs_1, preds_1, X_enc_1, X_scl_1 = predict_dataframe(df_single, chosen_model, chosen_threshold)
+            prob_val = float(probs_1[0])
+            pred_val = int(preds_1[0])
 
-        # Hiển thị vector 7 đặc trưng sau Mã hóa & Chuẩn hóa
-        with st.expander("🔎 Xem vector 7 đặc trưng sau Mã hóa One-Hot & Chuẩn hóa StandardScaler", expanded=True):
-            vec_df = pd.DataFrame({
-                "Đặc trưng đầu vào (7 biến)": X_enc_1.columns,
-                "Sau Mã hóa (Dùng cho RF / XGBoost / LightGBM)": [round(float(v), 4) for v in X_enc_1.iloc[0].values],
-                "Sau StandardScaler (Dùng cho Logistic Regression)": [round(float(v), 4) for v in X_scl_1.iloc[0].values],
-            })
-            st.dataframe(vec_df, width="stretch", hide_index=True)
+            if pred_val == 1:
+                st.markdown(
+                    f"""
+                    <div class="status-card-fail">
+                        <div class="status-title">🚨 CẢNH BÁO: CÓ NGUY CƠ HỎNG HÓC (DỰ ĐOÁN = 1)</div>
+                        <p class="status-desc">
+                            Mô hình <strong>{chosen_model}</strong> ước lượng xác suất hỏng hóc đạt
+                            <strong>{prob_val*100:.2f}%</strong> (vượt ngưỡng quyết định <strong>{chosen_threshold*100:.0f}%</strong>).
+                            Đề xuất lên lịch kiểm tra và bảo trì thiết bị sớm.
+                        </p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f"""
+                    <div class="status-card-ok">
+                        <div class="status-title">✅ BÌNH THƯỜNG: KHÔNG GHI NHẬN HỎNG HÓC (DỰ ĐOÁN = 0)</div>
+                        <p class="status-desc">
+                            Mô hình <strong>{chosen_model}</strong> ước lượng xác suất hỏng hóc là
+                            <strong>{prob_val*100:.2f}%</strong> (dưới ngưỡng quyết định <strong>{chosen_threshold*100:.0f}%</strong>).
+                            Thiết bị đang hoạt động trong vùng an toàn.
+                        </p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            g_col, sig_col = st.columns([1.05, 1.0])
+            with g_col:
+                st.plotly_chart(build_gauge_chart(prob_val, chosen_threshold), width="stretch")
+
+            with sig_col:
+                st.markdown("**Phân tích kỹ thuật nhanh (Chỉ số vật lý AI4I 2020):**")
+                eng_signals = analyze_engineering_signals(
+                    inp_type, float(inp_air), float(inp_proc), float(inp_rpm), float(inp_torque), float(inp_wear)
+                )
+                for sig in eng_signals:
+                    if sig["level"] == "danger":
+                        st.error(f"{sig['icon']} **{sig['title']}**: {sig['detail']}")
+                    elif sig["level"] == "warning":
+                        st.warning(f"{sig['icon']} **{sig['title']}**: {sig['detail']}")
+                    else:
+                        st.success(f"{sig['icon']} **{sig['title']}**: {sig['detail']}")
+
+            # Chỉ đối chiếu nhãn thực tế khi thông số vẫn nguyên bản 100% với mẫu Test đang chọn
+            if selected_row is not None and not is_modified:
+                actual_y = int(selected_row["Machine failure"])
+                if actual_y == 1 and pred_val == 1:
+                    verdict = "TP — Phát hiện đúng hỏng hóc"
+                elif actual_y == 0 and pred_val == 0:
+                    verdict = "TN — Dự đoán đúng bình thường"
+                elif actual_y == 0 and pred_val == 1:
+                    verdict = "FP — Cảnh báo nhầm (Dương tính giả)"
+                else:
+                    verdict = "FN — Bỏ sót hỏng hóc (Âm tính giả)"
+
+                compare_df = pd.DataFrame([
+                    {
+                        "Mã UDI": selected_row[id_col],
+                        "Product ID": selected_row["Product ID"],
+                        "Nhãn thực tế": f"{actual_y} ({'Có hỏng' if actual_y == 1 else 'Không hỏng'})",
+                        "Nhãn dự đoán": f"{pred_val} ({'Có hỏng' if pred_val == 1 else 'Không hỏng'})",
+                        "Xác suất P(y=1|x)": f"{prob_val*100:.2f}%",
+                        "Ngưỡng": f"{chosen_threshold:.2f}",
+                        "Kết luận đối chiếu": verdict,
+                    }
+                ])
+                st.markdown("**Đối chiếu với Nhãn thực tế (Tập Test):**")
+                st.dataframe(compare_df, width="stretch", hide_index=True)
+            elif selected_row is not None and is_modified:
+                st.info(
+                    "⚠️ Thông số đã được thay đổi so với mẫu Test gốc. Đã ẩn đối chiếu nhãn gốc (Chuyển sang chế độ dự đoán đầu vào tùy chỉnh)."
+                )
+
+            # Hiển thị vector 7 đặc trưng sau Mã hóa & Chuẩn hóa
+            with st.expander("🔎 Xem vector 7 đặc trưng sau Mã hóa One-Hot & Chuẩn hóa StandardScaler", expanded=True):
+                vec_df = pd.DataFrame({
+                    "Đặc trưng đầu vào (7 biến)": X_enc_1.columns,
+                    "Sau Mã hóa (Dùng cho RF / XGBoost / LightGBM)": [round(float(v), 4) for v in X_enc_1.iloc[0].values],
+                    "Sau StandardScaler (Dùng cho Logistic Regression)": [round(float(v), 4) for v in X_scl_1.iloc[0].values],
+                })
+                st.dataframe(vec_df, width="stretch", hide_index=True)
 
 
 # ------------------------------------------------------------------------------
@@ -743,8 +1025,11 @@ with tab2:
     st.subheader("Dự đoán Hàng loạt qua File CSV")
     st.markdown(
         "Tải lên file `.csv` chứa 6 thuộc tính đầu vào (`Type`, `Air temperature [K]`, `Process temperature [K]`, "
-        "`Rotational speed [rpm]`, `Torque [Nm]`, `Tool wear [min]`) hoặc bấm nút dùng thử **50 mẫu trích từ tập Test**."
+        "`Rotational speed [rpm]`, `Torque [Nm]`, `Tool wear [min]`) hoặc dùng các bộ dữ liệu thử nghiệm sẵn có."
     )
+
+    with st.expander("📏 Bảng phạm vi dữ liệu hợp lệ (Tập Train) — Dùng để kiểm tra từng dòng CSV", expanded=True):
+        st.dataframe(build_train_range_table(train_ranges), width="stretch", hide_index=True)
 
     b_col1, b_col2, b_col3 = st.columns([1.2, 1.2, 1.4])
     with b_col1:
@@ -773,16 +1058,19 @@ with tab2:
             width="stretch",
         )
 
-    up_col, demo_col = st.columns([2.2, 1.0])
+    up_col, demo_col1, demo_col2 = st.columns([1.8, 1.0, 1.1])
     with up_col:
         uploaded_file = st.file_uploader(
             "Chọn file CSV để tải lên:",
             type=["csv"],
             help="Chấp nhận tên cột gốc có [K]/[rpm]/[Nm]/[min] hoặc tên cột đã bỏ dấu ngoặc vuông.",
         )
-    with demo_col:
+    with demo_col1:
         st.markdown("<div style='height: 1.7rem;'></div>", unsafe_allow_html=True)
-        use_demo_50 = st.button("🧪 Dùng thử 50 mẫu trích từ tập Test", width="stretch", type="primary")
+        use_demo_50 = st.button("🧪 Dùng thử 50 mẫu tập Test", width="stretch", type="primary")
+    with demo_col2:
+        st.markdown("<div style='height: 1.7rem;'></div>", unsafe_allow_html=True)
+        use_demo_oor = st.button("⚠️ Dùng thử CSV có Ngoài phạm vi", width="stretch")
 
     if use_demo_50:
         # Trích 42 mẫu bình thường + 8 mẫu hỏng từ tập Test để minh họa trực quan
@@ -792,52 +1080,135 @@ with tab2:
         st.session_state["batch_df_source"] = demo_df
         st.session_state["batch_source_label"] = "50 mẫu trích từ tập Kiểm thử (gồm 42 mẫu bình thường + 8 mẫu hỏng thực tế)"
 
+    if use_demo_oor:
+        valid_mix = pd.concat([
+            df_test[df_test["Machine failure"] == 1].head(4),
+            df_test[df_test["Machine failure"] == 0].head(5),
+        ])[INPUT_COLS_RAW].copy()
+        oor_rows = pd.DataFrame([
+            {
+                "Type": "M",
+                "Air temperature [K]": 309.7,
+                "Process temperature [K]": 310.5,
+                "Rotational speed [rpm]": 1420,
+                "Torque [Nm]": 42.5,
+                "Tool wear [min]": 120,
+            },
+            {
+                "Type": "L",
+                "Air temperature [K]": 299.2,
+                "Process temperature [K]": 315.4,
+                "Rotational speed [rpm]": 980,
+                "Torque [Nm]": 82.0,
+                "Tool wear [min]": 180,
+            },
+            {
+                "Type": "X",
+                "Air temperature [K]": 298.5,
+                "Process temperature [K]": 309.0,
+                "Rotational speed [rpm]": 1500,
+                "Torque [Nm]": 40.0,
+                "Tool wear [min]": 280,
+            },
+        ])
+        mix_df = pd.concat([oor_rows, valid_mix], ignore_index=True)
+        st.session_state["batch_df_source"] = mix_df
+        st.session_state["batch_source_label"] = "12 mẫu hỗn hợp kiểm thử (3 dòng Ngoài phạm vi Train + 9 dòng hợp lệ từ Test)"
+
     if uploaded_file is not None:
-        try:
-            st.session_state["batch_df_source"] = read_csv_smart(uploaded_file)
-            st.session_state["batch_source_label"] = f"File đã tải lên: {uploaded_file.name}"
-        except Exception as exc:
-            st.error(f"Không thể đọc file CSV: {exc}")
+        upload_sig = (uploaded_file.name, uploaded_file.size)
+        if st.session_state.get("last_uploaded_sig") != upload_sig:
+            try:
+                uploaded_file.seek(0)
+                st.session_state["batch_df_source"] = read_csv_smart(uploaded_file)
+                st.session_state["batch_source_label"] = f"File đã tải lên: {uploaded_file.name}"
+                st.session_state["last_uploaded_sig"] = upload_sig
+            except Exception as exc:
+                st.error(f"Không thể đọc file CSV: {exc}")
+    else:
+        st.session_state["last_uploaded_sig"] = None
 
     if "batch_df_source" in st.session_state:
         raw_batch_df: pd.DataFrame = st.session_state["batch_df_source"].copy()
         st.info(f"**Nguồn dữ liệu hiện tại:** {st.session_state.get('batch_source_label', '')} ({len(raw_batch_df):,} bản ghi)")
 
         try:
+            if len(raw_batch_df) == 0:
+                raise ValueError("File CSV không chứa dòng dữ liệu nào.")
+
             norm_batch_df = normalize_input_columns(raw_batch_df)
-            probs_b, preds_b, _, _ = predict_dataframe(norm_batch_df, batch_model, float(batch_thr))
+            missing_cols = [c for c in INPUT_COLS_RAW if c not in norm_batch_df.columns]
+            if missing_cols:
+                raise ValueError(f"Thiếu các cột đầu vào bắt buộc: {missing_cols}")
+
+            # Kiểm tra từng dòng đối với cột Type và 5 cột số theo phạm vi Train
+            valid_mask, col_notes = validate_batch_dataframe(norm_batch_df, train_ranges)
+
+            n_total_b = len(raw_batch_df)
+            n_valid_b = int(valid_mask.sum())
+            n_oor_b = n_total_b - n_valid_b
+
+            probs_full = np.full(n_total_b, np.nan, dtype=float)
+            preds_full = np.full(n_total_b, -1, dtype=int)
+            if n_valid_b > 0:
+                probs_v, preds_v, _, _ = predict_dataframe(
+                    norm_batch_df.loc[valid_mask].copy(), batch_model, float(batch_thr)
+                )
+                probs_full[valid_mask] = probs_v
+                preds_full[valid_mask] = preds_v
 
             out_df = raw_batch_df.copy()
-            out_df["Xác suất hỏng (%)"] = np.round(probs_b * 100.0, 2)
-            out_df["Dự đoán (Nhãn)"] = preds_b
-            out_df["Trạng thái chẩn đoán"] = np.where(
-                preds_b == 1, "⚠️ Cảnh báo hỏng hóc", "✅ Bình thường"
+            out_df["Xác suất hỏng (%)"] = np.where(
+                valid_mask, np.round(probs_full * 100.0, 2), np.nan
+            )
+            out_df["Cột vượt phạm vi Train"] = col_notes
+            out_df["Kết luận dự đoán"] = np.where(
+                ~valid_mask,
+                "Kết quả ngoài phạm vi train, không đủ cơ sở kết luận",
+                np.where(
+                    preds_full == 1,
+                    "⚠️ Có hỏng hóc (Nhãn 1)",
+                    "✅ Bình thường (Nhãn 0)",
+                ),
             )
 
-            n_total_b = len(out_df)
-            n_fail_b = int((preds_b == 1).sum())
-            n_ok_b = n_total_b - n_fail_b
+            n_fail_b = int(((preds_full == 1) & valid_mask).sum())
+            n_ok_b = int(((preds_full == 0) & valid_mask).sum())
 
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Tổng số mẫu dự đoán", f"{n_total_b:,}")
+            k1.metric("Tổng số mẫu CSV", f"{n_total_b:,}")
             k2.metric("Bình thường (Nhãn 0)", f"{n_ok_b:,}")
-            k3.metric("Cảnh báo hỏng (Nhãn 1)", f"{n_fail_b:,}")
-            k4.metric("Tỷ lệ cảnh báo", f"{(n_fail_b / n_total_b * 100):.2f}%")
+            k3.metric("Có hỏng hóc (Nhãn 1)", f"{n_fail_b:,}")
+            k4.metric("Ngoài phạm vi Train", f"{n_oor_b:,}")
 
-            if "Machine failure" in out_df.columns:
-                m_batch = compute_metrics(out_df["Machine failure"], probs_b, threshold=float(batch_thr))
-                st.success(
-                    f"**Đối chiếu với cột `Machine failure` có sẵn trong dữ liệu:** "
-                    f"TP = `{m_batch['TP']}` | TN = `{m_batch['TN']}` | FP = `{m_batch['FP']}` | FN = `{m_batch['FN']}` "
-                    f"| Precision = `{m_batch['Precision']:.4f}` | Recall = `{m_batch['Recall']:.4f}` | F1 = `{m_batch['F1-score']:.4f}`"
+            if n_oor_b > 0:
+                st.warning(
+                    f"⚠️ Phát hiện **{n_oor_b:,}/{n_total_b:,}** dòng có dữ liệu nằm ngoài phạm vi tập Train. "
+                    "Hệ thống không gán nhãn Bình thường/Có hỏng hóc cho các dòng này và ghi rõ "
+                    "**\"Kết quả ngoài phạm vi train, không đủ cơ sở kết luận\"**."
                 )
 
-            def highlight_predicted_failure(row: pd.Series) -> List[str]:
-                if row["Dự đoán (Nhãn)"] == 1:
+            if "Machine failure" in out_df.columns and n_valid_b > 0:
+                y_sub = pd.to_numeric(out_df.loc[valid_mask, "Machine failure"], errors="coerce")
+                if y_sub.notna().all():
+                    m_batch = compute_metrics(y_sub.astype(int), probs_full[valid_mask], threshold=float(batch_thr))
+                    st.success(
+                        f"**Đối chiếu với cột `Machine failure` (tính trên {n_valid_b:,} mẫu hợp lệ trong phạm vi Train):** "
+                        f"TP = `{m_batch['TP']}` | TN = `{m_batch['TN']}` | FP = `{m_batch['FP']}` | FN = `{m_batch['FN']}` "
+                        f"| Precision = `{m_batch['Precision']:.4f}` | Recall = `{m_batch['Recall']:.4f}` | F1 = `{m_batch['F1-score']:.4f}`"
+                    )
+
+            def highlight_batch_row(row: pd.Series) -> List[str]:
+                concl = str(row["Kết luận dự đoán"])
+                if concl == "Kết quả ngoài phạm vi train, không đủ cơ sở kết luận":
+                    return ["background-color: #ffedd5; color: #9a3412; font-weight: 600;"] * len(row)
+                if "Có hỏng hóc" in concl:
                     return ["background-color: #fee2e2; color: #7f1d1d; font-weight: 600;"] * len(row)
                 return [""] * len(row)
 
-            styled_out = out_df.style.apply(highlight_predicted_failure, axis=1)
+            styled_out = out_df.style.apply(highlight_batch_row, axis=1).format(
+                {"Xác suất hỏng (%)": "{:.2f}"}, na_rep="—"
+            )
             st.dataframe(styled_out, width="stretch", height=440)
 
             csv_bytes = out_df.to_csv(index=False).encode("utf-8-sig")
